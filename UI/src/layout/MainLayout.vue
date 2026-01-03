@@ -29,7 +29,7 @@
                     <span>仪表盘</span>
                 </el-menu-item>
 
-                <el-menu-item index="/faces">
+                <el-menu-item index="/faces/add">
                     <el-icon>
                         <User />
                     </el-icon>

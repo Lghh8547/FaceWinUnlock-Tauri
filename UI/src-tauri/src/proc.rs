@@ -1,5 +1,10 @@
-use windows::Win32::{Foundation::{HWND, LPARAM, LRESULT, WPARAM}, UI::{Shell::DefSubclassProc, WindowsAndMessaging::{WM_WTSSESSION_CHANGE, WTS_SESSION_LOCK, WTS_SESSION_UNLOCK}}};
-
+use windows::Win32::{
+    Foundation::{HWND, LPARAM, LRESULT, WPARAM},
+    UI::{
+        Shell::DefSubclassProc,
+        WindowsAndMessaging::{WM_WTSSESSION_CHANGE, WTS_SESSION_LOCK, WTS_SESSION_UNLOCK},
+    },
+};
 
 // windows回调
 pub unsafe extern "system" fn wnd_proc_subclass(

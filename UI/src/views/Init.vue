@@ -22,6 +22,11 @@
     const isFinalizing = ref(false);
     const optionsStore = useOptionsStore();
 
+    let is_initialized = optionsStore.getOptionByKey('is_initialized');
+    if(is_initialized.index != -1 && is_initialized.data.val == 'true'){
+        initialized.value = true;
+    }
+
     let authForm = reactive({
         username: '',
         password: '',

@@ -7,6 +7,7 @@
 	import { ElMessageBox } from 'element-plus';
 	import { useOptionsStore } from "./stores/options";
 	import { useRouter } from 'vue-router';
+	import { invoke } from '@tauri-apps/api/core';
 
 	const isInit = ref(false);
 	const router = useRouter();
@@ -16,6 +17,8 @@
 	// 初始化SQL数据库
 	connect().then(()=>{
 		return optionsStore.init();
+	}).then(()=>{
+		return invoke("init_model");
 	}).then(()=>{
 		let is_initialized = optionsStore.getOptionByKey('is_initialized');
 		if(is_initialized.index == -1 || is_initialized.data.val != 'true'){

@@ -41,12 +41,14 @@ const databseTable = [
             { name: 'user_pwd', type: 'TEXT', notNull: true },
             // 人脸特征标识符或存储路径
             { name: 'face_token', type: 'TEXT', notNull: true },
+            // 面容置信度
+            { name: 'threshold', type: 'INTEGER', notNull: true },
             // 面容别名
             { name: 'alias', type: 'TEXT' },
             // 创建时间
             { name: 'createTime', type: 'TEXT', defaultValue: "datetime('now', 'localtime')" }
         ]
-      }
+    }
 ];
 
 /**
