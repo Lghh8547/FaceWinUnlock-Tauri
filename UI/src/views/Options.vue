@@ -37,10 +37,14 @@
 		// detectThreshold: 60,
 		autoStart: true,
 		faceRecogDelay: parseFloat(optionsStore.getOptionValueByKey('faceRecogDelay')) || 10.0,
+		faceRecogType: optionsStore.getOptionValueByKey('faceRecogType') || 'operation',
+		silentRun: optionsStore.getOptionValueByKey('silentRun') ? (optionsStore.getOptionValueByKey('silentRun') == 'false' ? false : true) : false,
+
 	})
 
 	const dllConfig = reactive({
 		showTile: optionsStore.getOptionValueByKey('showTile') ? (optionsStore.getOptionValueByKey('showTile') == 'false' ? false : true) : true,
+		retryDelay: parseFloat(optionsStore.getOptionValueByKey('retryDelay')) || 10.0,
 	})
 
 	const refreshCameraList = ()=>{
@@ -85,9 +89,9 @@
 	// 自启切换
 	const handleAutoStartChange = ()=>{
 		if(config.autoStart){
-			invoke("enable_global_autostart").catch(()=>{
+			invoke("enable_global_autostart").catch((e)=>{
 				config.autoStart = false;
-				ElMessage.error("请确保已添加开机启动权限");
+				ElMessage.error(formatObjectString(e));
 			});
 		}else{
 			invoke("disable_global_autostart").catch(()=>{
@@ -100,7 +104,9 @@
 	const saveAppConfig = () => {
 		optionsStore.saveOptions({
 			camera: config.camera,
-			faceRecogDelay: config.faceRecogDelay
+			faceRecogDelay: config.faceRecogDelay,
+			faceRecogType: config.faceRecogType,
+			silentRun: config.silentRun
 		}).then((errorArray)=>{
 			if(errorArray.length > 0){
 				ElMessage.warning({
@@ -112,16 +118,19 @@
 			}
 		}).catch();
 	}
-
 	const applyDllSettings = () => {
 		invoke("write_to_registry", {items: [
 			{
 				key: "SHOW_TILE",
 				value: dllConfig.showTile ? "1" : "0"
+			},{
+				key: "RETRY_DELAY",
+				value: dllConfig.retryDelay.toFixed(2)
 			}
 		]}).then(()=>{
 			return optionsStore.saveOptions({
-				showTile: dllConfig.showTile
+				showTile: dllConfig.showTile,
+				retryDelay: dllConfig.retryDelay,
 			})
 		}).then((errorArray)=>{
 			if(errorArray.length > 0){
@@ -281,8 +290,24 @@
 									</div>
 									<el-switch v-model="config.autoStart" @change="handleAutoStartChange"/>
 								</div>
-								<!-- cy: 本来想设置锁屏界面有操作后调用，但锁屏界面是隔离的，hook不生效，也未找到有效解决方案，先用这个 -->
 								<div class="option-row">
+									<div class="row-text">
+										<p class="label">是否静默自启</p>
+										<p class="sub">软件开机自动后，隐藏窗口界面</p>
+									</div>
+									<el-switch v-model="config.silentRun"/>
+								</div>
+								<div class="option-row">
+									<div class="row-text">
+										<p class="label">面容识别方式</p>
+										<p class="sub">锁屏完成后，用什么方式调用面容识别代码</p>
+									</div>
+									<el-select v-model="config.faceRecogType" style="width: 170px">
+										<el-option :value="'operation'" :label="'用户操作 (支持重试)'"/>
+										<el-option :value="'delay'" :label="'延迟时间'"/>
+									</el-select>
+								</div>
+								<div class="option-row" v-if="config.faceRecogType === 'delay'">
 									<div class="row-text">
 										<p class="label">锁屏后面容识别延迟（秒）</p>
 										<p class="sub">锁屏完成后，延迟指定秒数调用摄像头进行面容识别</p>
@@ -344,6 +369,20 @@
 								<p class="sub">在 Windows 锁屏界面显示解锁磁贴</p>
 							</div>
 							<el-switch v-model="dllConfig.showTile" />
+						</div>
+						<div class="option-row">
+							<div class="row-text">
+								<p class="label">重试时间（秒）</p>
+								<p class="sub">在面容不匹配时，时隔多长时间允许重试</p>
+							</div>
+							<el-input-number 
+								v-model="dllConfig.retryDelay"
+								:min="10" 
+								:max="120" 
+								:step="1" 
+								:precision="1"
+								style="width: 120px;"
+							/>
 						</div>
 					</div>
 				</div>

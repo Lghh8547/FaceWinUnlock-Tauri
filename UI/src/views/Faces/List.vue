@@ -28,6 +28,18 @@
         });
     };
 
+    const handleLock = (face) => {
+        facesStore.editFaceJsonData(JSON.stringify({ ...face.json_data, lock: !(face.json_data.lock)}), face.id).then(()=>{
+            if(face.json_data.lock) {
+                ElMessage.success('禁用面容成功');
+            }else{
+                ElMessage.success('启用面容成功');
+            }
+        }).catch(error => {
+            ElMessage.warning(error);
+        });
+    };
+
     // 编辑
     const handleEdit = (face) => {
         router.push({
@@ -70,8 +82,12 @@
 		<el-scrollbar v-if="filteredList.length > 0">
 			<el-row :gutter="20" style="width: 100%;">
 				<el-col v-for="face in filteredList" :key="face.id" :xs="24" :sm="12" :md="8" :lg="6">
-					<el-card class="face-card" :body-style="{ padding: '0px' }">
+					<el-card class="face-card" :class="{ 'disabled': face.json_data.lock }" :body-style="{ padding: '0px' }">
 						<div class="face-preview">
+                            <div class="disabled-overlay" v-if="face.json_data.lock">
+                                <div class="disabled-label">已禁用</div>
+                            </div>
+
                             <div class="face-img-wrapper">
                                 <img 
                                     v-face-img="face" 
@@ -82,8 +98,11 @@
                                 </div>
                             </div>
 							<div class="card-overlay">
-								<el-button size="small" circle icon="View" @click="handleView(face)" />
-								<el-button size="small" circle icon="Edit" @click="handleEdit(face)" />
+                                <el-button size="small" circle icon="Lock" @click="handleLock(face)" v-if="!face.json_data.lock" title="禁用面容"/>
+                                <el-button size="small" circle icon="Unlock" @click="handleLock(face)" v-else title="启用面容"/>
+								<el-button size="small" circle icon="View" @click="handleView(face)" v-if="!face.json_data.view" title="显示缩略图"/>
+								<el-button size="small" circle icon="Hide" @click="handleView(face)" v-else title="隐藏缩略图" />
+								<el-button size="small" circle icon="Edit" @click="handleEdit(face)" title="编辑面容" />
 							</div>
 						</div>
 
@@ -149,11 +168,26 @@
         transition: transform 0.3s;
         border: none;
         overflow: hidden;
+        position: relative;
+    }
+
+    /* 禁用状态的卡片整体样式 */
+    .face-card.disabled {
+        opacity: 0.7;
+        transform: none;
+        box-shadow: none;
+        background-color: #faf0f0;
     }
 
     .face-card:hover {
         transform: translateY(-5px);
         box-shadow: 0 10px 20px rgba(0, 0, 0, 0.1);
+    }
+
+    /* 禁用状态hover时取消悬浮效果 */
+    .face-card.disabled:hover {
+        transform: translateY(0);
+        box-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.1);
     }
 
     .face-preview {
@@ -163,6 +197,37 @@
         display: flex;
         align-items: center;
         justify-content: center;
+    }
+
+    /* 禁用状态的预览区样式 */
+    .face-card.disabled .face-preview {
+        background: #fdf2f2;
+    }
+
+    /* 禁用遮罩层 */
+    .disabled-overlay {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 160px;
+        background: rgba(245, 108, 108, 0.1);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 10;
+        pointer-events: none; /* 不影响子元素点击 */
+    }
+
+    .disabled-label {
+        background: #f56c6c;
+        color: white;
+        padding: 4px 12px;
+        border-radius: 4px;
+        font-size: 14px;
+        font-weight: bold;
+        transform: rotate(-15deg);
+        box-shadow: 0 2px 8px rgba(245, 108, 108, 0.3);
     }
 
     .face-img-wrapper {
@@ -222,14 +287,29 @@
         opacity: 0;
         transition: opacity 0.3s;
         box-sizing: border-box;
+        z-index: 20;
     }
 
     .face-card:hover .card-overlay {
         opacity: 1;
     }
 
+    /* 禁用状态下隐藏操作按钮的hover显示 */
+    .face-card.disabled .card-overlay {
+        background: rgba(0, 0, 0, 0.3);
+    }
+
     .face-info {
         padding: 15px;
+    }
+
+    .face-card.disabled .face-info {
+        color: #909399;
+    }
+
+    .face-card.disabled .alias {
+        color: #909399;
+        text-decoration: line-through;
     }
 
     .info-row {
@@ -257,5 +337,9 @@
         border-top: 1px dashed #ebeef5;
         display: flex;
         justify-content: flex-end;
+    }
+
+    .face-card.disabled .card-footer .el-button {
+        opacity: 0.8;
     }
 </style>

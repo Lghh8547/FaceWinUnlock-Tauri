@@ -1,5 +1,5 @@
 // 引入必要的Win32 API和同步原语
-use windows::Win32::{Foundation::{HANDLE, STATUS_SUCCESS}, Security::Authentication::Identity::{LsaConnectUntrusted, LsaDeregisterLogonProcess, LsaLookupAuthenticationPackage, LSA_STRING}, Storage::FileSystem::{CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_GENERIC_READ, FILE_SHARE_NONE, OPEN_EXISTING}, UI::Shell::*};
+use windows::Win32::{Foundation::{HANDLE, STATUS_SUCCESS}, Security::Authentication::Identity::{LsaConnectUntrusted, LsaDeregisterLogonProcess, LsaLookupAuthenticationPackage, LSA_STRING}, UI::Shell::*};
 use std::sync::{atomic::Ordering, Arc, Mutex};
 use crate::{dll_add_ref, dll_release, read_facewinunlock_registry, CPipeListener::CPipeListener, CSampleCredential::SampleCredential, SharedCredentials};
 use windows_core::{implement, BOOL, PSTR, PWSTR};
@@ -16,9 +16,10 @@ struct ProviderInner {
     usage_scenario: CREDENTIAL_PROVIDER_USAGE_SCENARIO, // 使用场景（登录、解锁等）
     events: Option<ICredentialProviderEvents>, // 系统事件接口
     advise_context: usize, // 通知上下文ID
-    listener: Option<Arc<CPipeListener>>, // 管道监听器实例
+    listener: Option<Arc<Mutex<CPipeListener>>>, // 管道监听器实例
     pub shared_creds: Arc<Mutex<SharedCredentials>>, // 共享的凭据列表
-    pub auth_package_id: u32 // 认证包ID
+    pub auth_package_id: u32, // 认证包ID
+    pub credential: Option<ICredentialProviderCredential>,
 }
 
 impl SampleProvider {
@@ -45,7 +46,8 @@ impl SampleProvider {
                 advise_context: 0,
                 listener: None,
                 shared_creds: shared,
-                auth_package_id: auth_id
+                auth_package_id: auth_id,
+                credential: None
             }),
         }
     }
@@ -55,26 +57,13 @@ impl SampleProvider {
 impl Drop for SampleProvider {
     fn drop(&mut self) {
         // 准备安全停止监听线程
-        let inner = self.inner.lock().unwrap();
-        if let Some(listener) = inner.listener.clone() {
-            // 如果有监听线程，并且正在运行中
-            if listener.running.swap(false, Ordering::SeqCst) { 
-                info!("SampleProvider::drop - 安全关闭监听线程……");
-                unsafe {
-                    let _ = CreateFileW(
-                        windows_core::w!(r"\\.\pipe\MansonWindowsUnlockRust"),
-                        FILE_GENERIC_READ.0,
-                        FILE_SHARE_NONE,
-                        None,
-                        OPEN_EXISTING,
-                        FILE_FLAGS_AND_ATTRIBUTES(0),
-                        None
-                    );
-                }
-                // 给线程一个微小的调度时间窗口
-                std::thread::yield_now();
-            }
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(listener) = inner.listener.take() {
+            let mut listener = listener.lock().unwrap();
+            listener.stop_and_join();
         }
+
+        inner.listener = None;
 
         info!("SampleProvider::drop - 销毁凭据提供程序实例");
         dll_release(); // 减少DLL引用计数
@@ -201,17 +190,15 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
         unsafe {
             // 如果管道已经收到了数据，告诉系统我们要自动登录
             if let Some(l) = &inner.listener {
-                if l.is_unlocked.load(Ordering::SeqCst) {
+                let listener = l.lock().unwrap();
+                if listener.is_unlocked.load(Ordering::SeqCst) {
+                    listener.is_unlocked.store(false, Ordering::SeqCst);
                     *pdwcount = 1;
                     *pdwdefault = 0;
                     *pbautologonwithdefault = BOOL::from(true); // 触发自动登录
+                } else {
+                    *pdwcount = if show_tile { 1 } else { 0 };
                 }
-            } else {
-                *pdwcount = if show_tile { 1 } else { 0 };
-                // 初始化默认凭据索引和自动登录开关
-                *pdwdefault = 0;
-                // 默认关闭自动登录
-                *pbautologonwithdefault = BOOL::from(false);
             }
         }
         info!("SampleProvider::GetCredentialCount - 凭据数量: 1，默认索引: 0");
@@ -223,10 +210,18 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
     fn GetCredentialAt(&self, dwindex: u32) -> windows_core::Result<ICredentialProviderCredential> {
         info!("SampleProvider::GetCredentialAt - 获取凭据，索引: {}", dwindex);
         if dwindex == 0 {
-            let inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock().unwrap();
+            if let Some(old_cred) = inner.credential.take() {
+                info!("SampleProvider::GetCredentialAt - 销毁已存在的旧凭据实例");
+                drop(old_cred);
+                dll_release();
+            }
             // 创建凭据实例并转换为接口返回，并传递收到的用户名和密码
+            info!("SampleProvider::GetCredentialAt - 创建新的凭据实例");
             let cred = SampleCredential::new(inner.shared_creds.clone(), inner.auth_package_id);
-            Ok(cred.into())
+            let cred_interface: ICredentialProviderCredential = cred.into();
+            inner.credential = Some(cred_interface.clone());
+            Ok(cred_interface)
         } else {
             error!("SampleProvider::GetCredentialAt - 无效的凭据索引: {}", dwindex);
             Err(windows::core::Error::from_hresult(windows::Win32::Foundation::E_INVALIDARG))

@@ -1,6 +1,6 @@
-use std::{ffi::OsStr, os::windows::{ffi::OsStrExt, process::CommandExt}, process::Command};
+use std::{os::windows::process::CommandExt, process::Command};
 
-use crate::{utils::custom_result::CustomResult, OpenCVResource, APP_STATE, DB_POOL, ROOT_DIR};
+use crate::{utils::custom_result::CustomResult, OpenCVResource, APP_STATE, DB_POOL, GLOBAL_TRAY, ROOT_DIR};
 use opencv::{
     core::{Mat, MatTraitConst, Size},
     objdetect::{FaceDetectorYN, FaceRecognizerSF},
@@ -10,30 +10,26 @@ use r2d2::Pool;
 use r2d2_sqlite::rusqlite;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tauri::{AppHandle, Manager};
 use tauri_plugin_log::log::{error, info, warn};
 use windows::{
-    core::{BSTR, HRESULT, HSTRING, PWSTR},
+    core::{BSTR, HSTRING, PWSTR},
     Win32::{
-        Foundation::{CloseHandle, GetLastError, GENERIC_WRITE, HANDLE},
+        Foundation::{E_UNEXPECTED, HWND},
         Media::{
             DirectShow::ICreateDevEnum,
             MediaFoundation::{CLSID_SystemDeviceEnum, CLSID_VideoInputDeviceCategory},
-        },
-        Storage::FileSystem::{
-            CreateFileW, WriteFile, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_MODE, OPEN_EXISTING,
         },
         System::{
             Com::{
                 CoCreateInstance, CoInitializeEx, CoUninitialize, IEnumMoniker,
                 StructuredStorage::IPropertyBag, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
-            },
-            Pipes::WaitNamedPipeW,
-            Shutdown::LockWorkStation,
-            Variant::{VariantClear, VARIANT},
-            WindowsProgramming::GetUserNameW,
+            }, RemoteDesktop::WTSUnRegisterSessionNotification, Shutdown::LockWorkStation, Variant::{VariantClear, VARIANT}, WindowsProgramming::GetUserNameW
         },
     },
 };
+
+use super::pipe::Client;
 
 #[derive(Debug, Clone, Serialize)]
 struct ValidCameraInfo {
@@ -348,30 +344,56 @@ pub fn enable_global_autostart() -> Result<CustomResult, CustomResult> {
     let task_name = "FaceWinUnlockAutoStart";
     let task_run = format!("\"{}\" --silent", path);
 
-    // /RU "Users": 指定所有用户组，这样任何用户登录都会尝试触发
-    // /IT: 允许交互（Interactive），对于 GUI 程序非常重要
-    // 注意：/RL HIGHEST 和 /RU 同时使用时，有时在非管理员登录时会有限制
-    // 但对于需要管理员权限的程序，这是 Windows 允许的最广范围了
     let output = Command::new("schtasks")
         .args(&[
             "/Create",
             "/TN", task_name,
             "/TR", &task_run,
             "/SC", "ONLOGON",
-            "/RL", "HIGHEST", 
-            "/RU", "Users",  // 关键：指定为用户组
+            "/RL", "HIGHEST",
+            "/RU", "BUILTIN\\Users",  // 全用户组
+            "/IT",
+            "/DELAY", "0000:10",
             "/F",
         ])
         .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| CustomResult::error(Some(format!("执行系统命令失败: {}", e)), None))?;
 
-    if output.status.success() {
-        Ok(CustomResult::success(None, None))
-    } else {
+    if !output.status.success() {
         let err_msg = String::from_utf8_lossy(&output.stderr);
-        Err(CustomResult::error(Some(format!("创建全用户计划任务失败: {}", err_msg)), None))
+        return Err(CustomResult::error(Some(format!("创建全用户计划任务失败: {}", err_msg)), None));
     }
+
+    // 增强版：修改任务设置（补充会话交互配置）
+    let ps_command = format!(
+        "$task = Get-ScheduledTask -TaskName '{}'; \
+         $task.Settings.DisallowStartIfOnBatteries = $false; \
+         $task.Settings.StopIfGoingOnBatteries = $false; \
+         $task.Settings.AllowInteractive = $true; \
+         $task.Settings.Hidden = $false; \
+         $task.Principal.LogonType = 'InteractiveToken'; \
+         Set-ScheduledTask -InputObject $task; \
+         Write-Host '任务配置已更新：' $task.Principal.LogonType",
+        task_name
+    );
+
+    let ps_output = Command::new("powershell")
+        .args(&[
+            "-ExecutionPolicy", "Bypass",
+            "-NoProfile",              // 不加载 PowerShell 配置，避免干扰
+            "-Command", &ps_command,
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| CustomResult::error(Some(format!("PowerShell 修改任务设置失败: {}", e)), None))?;
+
+    if !ps_output.status.success() {
+        let err_msg = String::from_utf8_lossy(&ps_output.stderr);
+        warn!("警告：修改任务高级设置失败，但基础任务已创建: {}", err_msg);
+    }
+
+    Ok(CustomResult::success(None, None))
 }
 
 // 禁用全用户自启动
@@ -415,6 +437,27 @@ pub fn check_global_autostart() -> Result<CustomResult, CustomResult> {
     ))
 }
 
+// 关闭软件
+#[tauri::command]
+pub fn close_app(app_handle: AppHandle) -> Result<CustomResult, CustomResult> {
+    let window = app_handle.get_webview_window("main").unwrap();
+    let hwnd = window.hwnd().unwrap();
+    unsafe {
+        // 注销 WTS 通知
+        let _ = WTSUnRegisterSessionNotification(HWND(hwnd.0));
+    }
+    
+    // 关闭系统托盘
+    let mut guard = GLOBAL_TRAY.lock().map_err(|e| CustomResult::error(Some(format!("锁定托盘全局变量失败: {}", e)), None))?;
+    if let Some(tray_any) = guard.as_mut() {
+        tray_any.set_visible(false)
+            .map_err(|e| CustomResult::error(Some(format!("隐藏托盘图标失败: {}", e)), None))?;
+    }
+
+    app_handle.exit(0);
+
+    Ok(CustomResult::success(None, None))
+}
 // 使用指定后端尝试打开摄像头并验证读取帧
 fn try_open_camera_with_backend(
     backend: CameraBackend,
@@ -538,82 +581,14 @@ fn is_camera_index_valid(index: u32) -> opencv::Result<bool> {
 
 // 解锁屏幕
 pub fn unlock(user_name: String, password: String) -> windows::core::Result<()> {
-    unsafe {
-        let pipe_name = HSTRING::from("\\\\.\\pipe\\MansonWindowsUnlockRust");
-        // 等待管道连接
-        if !WaitNamedPipeW(&pipe_name.clone(), 5000).as_bool() {
-            return Err(windows::core::Error::new(
-                HRESULT(0),
-                "不能连接到管道: MansonWindowsUnlockRust",
-            ));
-        }
-
-        // 打开管道
-        let handle = CreateFileW(
-            &pipe_name.clone(), // 管道名称
-            GENERIC_WRITE.0,    // 对文件的操作模式，只写
-            FILE_SHARE_MODE(0), // 阻止对管道的后续打开操作，在我主动关闭之前
-            None,
-            OPEN_EXISTING, // 只在文件存在时才打开，否则返回错误
-            FILE_FLAGS_AND_ATTRIBUTES(0),
-            None,
-        );
-        if handle.is_err() {
-            return Err(windows::core::Error::new(
-                HRESULT(0),
-                format!("打开管道失败: {:?}", handle.err()),
-            ));
-        }
-        let handle = handle.unwrap();
-
-        // 向管道发送用户名
-        let write_success = send_to_pipe(user_name, handle);
-        if write_success.is_err() {
-            let _ = CloseHandle(handle);
-            return Err(windows::core::Error::new(
-                HRESULT(0),
-                format!(
-                    "发送用户名失败: {:?}, 扩展信息: {:?}",
-                    write_success.err(),
-                    GetLastError()
-                ),
-            ));
-        }
-
-        // 向管道发送密码
-        let write_success = send_to_pipe(password, handle);
-        if write_success.is_err() {
-            let _ = CloseHandle(handle);
-            return Err(windows::core::Error::new(
-                HRESULT(0),
-                format!(
-                    "发送密码失败: {:?}, 扩展信息: {:?}",
-                    write_success.err(),
-                    GetLastError()
-                ),
-            ));
-        }
-
-        let _ = CloseHandle(handle);
-    };
+    let client = Client::new(HSTRING::from(r"\\.\pipe\MansonWindowsUnlockRustServer"));
+    if client.is_err() {
+        return Err(windows::core::Error::new(E_UNEXPECTED, "管道不存在"));
+    }
+    let client = client.unwrap();
+    if let Err(e) = crate::utils::pipe::write(client.handle, format!("{}::FaceWinUnlock::{}", user_name, password)) {
+        println!("向客户端写入数据失败: {:?}", e);
+    }
 
     Ok(())
-}
-
-// 向管道发送数据
-fn send_to_pipe(content: String, handle: HANDLE) -> windows::core::Result<()> {
-    unsafe {
-        // 转 UTF-16 含 \0
-        let wide_chars: Vec<u16> = OsStr::new(&content)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-        // 转 &[u8] 切片
-        let write_buf =
-            std::slice::from_raw_parts(wide_chars.as_ptr() as *const u8, wide_chars.len() * 2);
-        // 准备字节数
-        let mut total_bytes = write_buf.len() as u32;
-
-        WriteFile(handle, Some(write_buf), Some(&mut total_bytes), None)
-    }
 }

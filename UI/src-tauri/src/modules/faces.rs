@@ -1,7 +1,5 @@
 use std::{
-    fs,
-    io::{Read, Write},
-    path::PathBuf,
+    fs, io::{Read, Write}, path::PathBuf, thread::sleep, time::Duration
 };
 
 use crate::{utils::custom_result::CustomResult, APP_STATE, ROOT_DIR};
@@ -288,9 +286,23 @@ pub fn get_feature(img: &Mat, face_detection_threshold: f32) -> Result<Mat, Stri
 
 // 从摄像头中读取视频帧
 pub fn read_mat_from_camera() -> Result<Mat, String> {
-    let mut app_state = APP_STATE
-        .lock()
-        .map_err(|e| format!("获取app状态失败 {}", e))?;
+    // 此处在 proc中，face_recog_type == "operation" 时，如果系统进入睡眠状态
+    // 这里会变成死锁，而Win + L锁屏就不会，并且按延迟时间的解锁，即便进入睡眠状态
+    // 也不会变成死锁，具体原因不明，真让人头大...
+    // 所以这里改成 try_lock，不堵塞主线程了
+    let mut app_state = None;
+    for _ in 0..3 {
+        if let Ok(inner) = APP_STATE.try_lock() {
+            app_state = Some(inner);
+            break;
+        }
+        sleep(Duration::from_millis(100));
+    }
+    
+    // 重试3次还拿不到，再返回错误
+    let mut app_state = app_state.ok_or_else(|| {
+        format!("获取app状态失败（锁被占用超过300ms）")
+    })?;
 
     // 如果摄像头没打开
     if app_state.camera.is_none() {

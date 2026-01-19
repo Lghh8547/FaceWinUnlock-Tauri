@@ -9,6 +9,7 @@
 		Tools 
 	} from '@element-plus/icons-vue'
 	
+	const version = ref(localStorage.getItem("version") || 'unknown');
 </script>
 
 <template>
@@ -52,6 +53,10 @@
             </el-menu>
 
             <div class="aside-footer">
+				<div class="version-info">
+                    <span class="version-label">版本</span>
+                    <span class="version-number">v {{ version }}</span>
+                </div>
 				<!-- 写死就行了，不就绪不会显示这个 (笑  -->
                 <el-tag size="small" type="success" effect="plain">系统服务已就绪</el-tag>
             </div>
@@ -119,9 +124,34 @@
 
 	/* 底部状态 */
 	.aside-footer {
-		padding: 20px;
+		padding: 15px 20px;
 		border-top: 1px solid #f0f0f0;
 		text-align: center;
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+	}
+
+	.version-info {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 4px;
+		font-size: 12px;
+		color: #909399;
+	}
+
+	.version-label {
+		color: #c0c4cc;
+	}
+
+	.version-number {
+		font-weight: 500;
+		color: #606266;
+	}
+
+	.status-tag {
+		margin: 0;
 	}
 
 	/* 主内容区 */

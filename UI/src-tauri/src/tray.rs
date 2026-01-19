@@ -2,13 +2,14 @@ use std::sync::Arc;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, Runtime,
+    AppHandle, Emitter, Manager, Wry,
 };
-use windows::Win32::{Foundation::HWND, System::RemoteDesktop::WTSUnRegisterSessionNotification};
 
-pub fn create_tray_menu<R: Runtime>(
-    app: &AppHandle<R>,
-) -> Result<Menu<R>, Box<dyn std::error::Error>> {
+use crate::{utils::api::close_app, GLOBAL_TRAY};
+
+pub fn create_tray_menu(
+    app: &AppHandle<Wry>,
+) -> Result<Menu<Wry>, Box<dyn std::error::Error>> {
     let show_window = MenuItem::with_id(app, "show-window", "显示窗口", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
 
@@ -18,11 +19,10 @@ pub fn create_tray_menu<R: Runtime>(
     Ok(menu)
 }
 
-pub fn create_system_tray<R: Runtime>(
-    app: &AppHandle<R>,
-) -> Result<Arc<TrayIcon<R>>, Box<dyn std::error::Error>> {
+pub fn create_system_tray(
+    app: &AppHandle<Wry>,
+) -> Result<Arc<TrayIcon<Wry>>, Box<dyn std::error::Error>> {
     let menu = create_tray_menu(app)?;
-
     let tray = Arc::new(
         TrayIconBuilder::new()
             .icon(app.default_window_icon().unwrap().clone())
@@ -31,7 +31,9 @@ pub fn create_system_tray<R: Runtime>(
             .tooltip("facewinunlock-tauri")
             .build(app)?,
     );
-    let tray_handle_for_close = tray.clone();
+
+    *GLOBAL_TRAY.lock().unwrap() = Some(tray.clone());
+
     let window = app.get_webview_window("main").unwrap();
 
     tray.on_menu_event(move |app, event| match event.id.as_ref() {
@@ -40,13 +42,7 @@ pub fn create_system_tray<R: Runtime>(
             let _ = window.set_focus();
         }
         "quit" => {
-            let hwnd = window.hwnd().unwrap();
-            unsafe {
-                // 注销 WTS 通知
-                let _ = WTSUnRegisterSessionNotification(HWND(hwnd.0));
-            }
-            let _ = tray_handle_for_close.set_visible(false);
-            app.exit(0);
+            let _ = close_app(app.clone());
         }
         _ => {
             let _ = window.emit("menu-event", format!("unknow id {:?}", event.id().as_ref()));

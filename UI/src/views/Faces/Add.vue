@@ -307,7 +307,8 @@
                     "json_data": JSON.stringify({
                         threshold: threshold.value,
                         alias: faceName.value || '',
-                        view: true,
+                        view: true, // 默认可见
+                        lock: false, // 默认不锁
                         faceDetectionThreshold: getFaceDetectionThresholdValue()
                     })
                 });
@@ -320,7 +321,8 @@
                     "json_data": JSON.stringify({
                         threshold: threshold.value,
                         alias: faceName.value || '',
-                        view: editFaceData.json_data.view ? editFaceData.json_data.view : true,
+                        view: editFaceData.json_data.view != undefined ? editFaceData.json_data.view : true,
+                        lock: editFaceData.json_data.lock != undefined ? editFaceData.json_data.lock : true,
                         faceDetectionThreshold: getFaceDetectionThresholdValue()
                     })
                 }, targetId);

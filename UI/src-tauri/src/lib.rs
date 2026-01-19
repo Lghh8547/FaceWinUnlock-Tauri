@@ -2,13 +2,11 @@ use std::{
     env,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicI32},
-        Mutex,
+        atomic::{AtomicBool, AtomicI32}, Arc, Mutex
     },
 };
-
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-use tauri::Manager;
+use tauri::{tray::TrayIcon, Manager, Wry};
 use windows::Win32::{
     Foundation::HWND,
     System::RemoteDesktop::{WTSRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION},
@@ -35,8 +33,8 @@ use tauri_plugin_log::{Target, TargetKind};
 use utils::api::{
     check_global_autostart, disable_global_autostart, enable_global_autostart, get_camera,
     get_now_username, init_model, open_camera, open_directory, stop_camera, test_win_logon,
+    close_app
 };
-
 mod tray;
 use tray::create_system_tray;
 
@@ -55,8 +53,14 @@ pub struct AppState {
     pub camera: Option<OpenCVResource<VideoCapture>>,
 }
 
+// 是否退出线程
+static IS_BREAK_THREAD: AtomicBool = AtomicBool::new(true);
+// 是否正在运行面容识别？
+static IS_RUN: AtomicBool = AtomicBool::new(false);
 // 定义全局只读连接池，用来在解锁中对数据库读操作
 lazy_static::lazy_static! {
+    // 系统托盘
+    static ref GLOBAL_TRAY: Mutex<Option<Arc<TrayIcon<Wry>>>> = Mutex::new(None);
     static ref DB_POOL: Mutex<Option<Pool<SqliteConnectionManager>>> = Mutex::new(None);
     // 不在使用状态管理，因为proc获取不到
     static ref APP_STATE: Mutex<AppState> = Mutex::new(AppState {
@@ -89,6 +93,8 @@ const TIMER_ID_LOCK_CHECK: usize = 1001;
 
 // 全局摄像头索引
 static CAMERA_INDEX: AtomicI32 = AtomicI32::new(0);
+// 面容不匹配时，当前的尝试次数
+static MATCH_FAIL_COUNT: AtomicI32 = AtomicI32::new(0);
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -100,10 +106,13 @@ pub fn run() {
     {
         builder = builder
             .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-                let _ = app
+                let main = app
                     .get_webview_window("main")
-                    .expect("no main window")
-                    .set_focus();
+                    .expect("no main window");
+                if !main.is_visible().unwrap() {
+                    main.show().unwrap();
+                }
+                main.set_focus().unwrap();
             }))
             .plugin(tauri_plugin_fs::init())
             // 对话框
@@ -161,6 +170,9 @@ pub fn run() {
                     // 只有不是静默启动时才显示
                     window.show().unwrap();
                 }
+
+                // 添加一个线程，用于创建管道
+
                 Ok(())
             })
             .on_window_event(|window, event| {
@@ -197,7 +209,8 @@ pub fn run() {
                 open_directory,
                 enable_global_autostart,
                 disable_global_autostart,
-                check_global_autostart
+                check_global_autostart,
+                close_app
             ]);
     }
     builder

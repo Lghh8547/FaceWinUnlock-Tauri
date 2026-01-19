@@ -2,7 +2,7 @@ use opencv::{objdetect::FaceRecognizerSF_DisType, prelude::FaceRecognizerSFTrait
 use serde::Deserialize;
 use std::{sync::atomic::Ordering, thread::sleep, time::Duration};
 use tauri_plugin_log::log::{error, info, warn};
-use windows::Win32::{
+use windows::{core::HSTRING, Win32::{
     Foundation::{HWND, LPARAM, LRESULT, WPARAM},
     UI::{
         Shell::DefSubclassProc,
@@ -11,16 +11,18 @@ use windows::Win32::{
             WTS_SESSION_UNLOCK,
         },
     },
-};
+}};
 
 use crate::{
-    modules::faces::{get_feature, load_face_data, read_mat_from_camera},
-    utils::api::{open_camera, stop_camera, unlock},
-    APP_STATE, CAMERA_INDEX, DB_POOL, IS_LOCKED, ROOT_DIR, TIMER_ID_LOCK_CHECK,
+    modules::faces::{get_feature, load_face_data, read_mat_from_camera}, utils::{api::{open_camera, stop_camera, unlock}, pipe::{read, Client, Server}}, APP_STATE, CAMERA_INDEX, DB_POOL, IS_BREAK_THREAD, IS_LOCKED, IS_RUN, MATCH_FAIL_COUNT, ROOT_DIR, TIMER_ID_LOCK_CHECK
 };
 
+// 最大成功次数，超过这个次数判断为面容匹配
 const MAX_SUCCESS: usize = 3;
+// 最大失败次数，超过这个次数判断为面容不匹配
 const MAX_FAIL: usize = 3;
+// 最大重试次数，这不能让用户自己输入，如果错误次数太多，微软会锁定账户的，很危险
+const MAX_RETRY: i32 = 3;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")] // 适配 JSON 中的驼峰命名
@@ -31,6 +33,9 @@ pub struct FaceExtraData {
     pub threshold: f32,
     /// 是否在列表页显示图片缩略图
     pub view: bool,
+    // 是否锁定面容？为true时不参与判定
+    #[serde(default)] // 0.2.0 以下版本的用户没有这一项，默认为false
+    pub lock: bool,
     /// 人脸检测置信度阈值
     pub face_detection_threshold: f32,
 }
@@ -50,6 +55,8 @@ pub unsafe extern "system" fn wnd_proc_subclass(
 
         match event_type {
             WTS_SESSION_LOCK => {
+                // 重置尝试次数
+                MATCH_FAIL_COUNT.store(0, Ordering::SeqCst);
                 // 屏幕锁屏，关闭摄像头，因为不确定用户是否开启了摄像头
                 if let Err(e) = stop_camera() {
                     error!("关闭摄像头失败: {}", e.to_string());
@@ -91,15 +98,15 @@ pub unsafe extern "system" fn wnd_proc_subclass(
                                         // 只有初始化完成才启动
                                         if is_initialized == "true" {
                                             let result: Result<String, _> = conn.query_row(
-                                                "SELECT val FROM options WHERE key = 'faceRecogDelay';",
+                                                "SELECT val FROM options WHERE key = 'faceRecogType';",
                                                 [],
                                                 |row| row.get::<&str, String>("val"),
                                             );
 
-                                            let time = match result {
+                                            let face_recog_type = match result {
                                                 Ok(val) => val,
                                                 Err(r2d2_sqlite::rusqlite::Error::QueryReturnedNoRows) => {
-                                                    String::from("10.0")
+                                                    String::from("operation")
                                                 }
                                                 Err(e) => {
                                                     error!("从数据库获取设置失败: {:?}", e);
@@ -107,18 +114,7 @@ pub unsafe extern "system" fn wnd_proc_subclass(
                                                 }
                                             };
 
-                                            if !time.is_empty() {
-                                                let time_ms: f32 = match time.parse::<f32>() {
-                                                    Ok(seconds) => seconds * 1000.0,
-                                                    Err(e) => {
-                                                        error!(
-                                                            "秒数字符串转换失败: {}，使用默认值 10000 毫秒",
-                                                            e
-                                                        );
-                                                        10.0 * 1000.0
-                                                    }
-                                                };
-
+                                            if !face_recog_type.is_empty() {
                                                 // 读取摄像头索引
                                                 let result: Result<String, _> = conn.query_row(
                                                     "SELECT val FROM options WHERE key = 'camera';",
@@ -142,20 +138,83 @@ pub unsafe extern "system" fn wnd_proc_subclass(
                                                     Ordering::SeqCst,
                                                 );
 
-                                                IS_LOCKED.store(true, Ordering::SeqCst);
-                                                // 设置一个定时器
-                                                // 当时间到达时，系统会发送 WM_TIMER 消息
-                                                unsafe {
-                                                    SetTimer(
-                                                        Some(hwnd),
-                                                        TIMER_ID_LOCK_CHECK,
-                                                        time_ms as u32,
-                                                        None,
-                                                    )
-                                                };
-                                                info!("计时器已设置 {}", time_ms);
-                                            } else {
-                                                error!("未获取到延迟秒，停止启动面容识别");
+                                                if face_recog_type == "operation" {
+                                                    info!("按用户操作调用面容识别代码");
+                                                    // 锁屏连接管道，等待管道传来的运行
+                                                    IS_BREAK_THREAD.store(false, Ordering::SeqCst);
+                                                    // 开启一个新的线程
+                                                    std::thread::spawn(move || { 
+                                                        let mut server = Server::new(HSTRING::from(r"\\.\pipe\MansonWindowsUnlockRustClient"));
+                                                        let f_connected = server.connect();
+                                                        // 连接失败后退出循环
+                                                        if f_connected.is_err() {
+                                                            error!("管道连接失败：{:?}", f_connected.err());
+                                                        } else {
+                                                            while !IS_BREAK_THREAD.load(Ordering::SeqCst) {
+                                                                // 如果需要退出线程
+                                                                if IS_BREAK_THREAD.load(Ordering::SeqCst) {
+                                                                    break; 
+                                                                }
+                                                                // 等待管道的run命令
+                                                                if let Ok(content) =  read(server.handle) {
+                                                                    if content.contains("run") && !IS_RUN.load(Ordering::SeqCst) && MATCH_FAIL_COUNT.load(Ordering::SeqCst) < MAX_RETRY {
+                                                                        info!("运行面容识别代码");
+                                                                        run_before();
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        
+                                                        IS_BREAK_THREAD.store(true, Ordering::SeqCst);
+                                                        info!("线程安全退出");
+                                                    });
+                                                } else {
+                                                    // 按操作时间
+                                                    let result: Result<String, _> = conn.query_row(
+                                                        "SELECT val FROM options WHERE key = 'faceRecogDelay';",
+                                                        [],
+                                                        |row| row.get::<&str, String>("val"),
+                                                    );
+        
+                                                    let time = match result {
+                                                        Ok(val) => val,
+                                                        Err(r2d2_sqlite::rusqlite::Error::QueryReturnedNoRows) => {
+                                                            String::from("10.0")
+                                                        }
+                                                        Err(e) => {
+                                                            error!("从数据库获取设置失败: {:?}", e);
+                                                            String::new()
+                                                        }
+                                                    };
+        
+                                                    if !time.is_empty() {
+                                                        let time_ms: f32 = match time.parse::<f32>() {
+                                                            Ok(seconds) => seconds * 1000.0,
+                                                            Err(e) => {
+                                                                error!(
+                                                                    "秒数字符串转换失败: {}，使用默认值 10000 毫秒",
+                                                                    e
+                                                                );
+                                                                10.0 * 1000.0
+                                                            }
+                                                        };
+        
+                                                        IS_LOCKED.store(true, Ordering::SeqCst);
+                                                        // 设置一个定时器
+                                                        // 当时间到达时，系统会发送 WM_TIMER 消息
+                                                        unsafe {
+                                                            SetTimer(
+                                                                Some(hwnd),
+                                                                TIMER_ID_LOCK_CHECK,
+                                                                time_ms as u32,
+                                                                None,
+                                                            )
+                                                        };
+                                                        info!("计时器已设置 {}", time_ms);
+                                                    } else {
+                                                        error!("未获取到延迟秒，停止启动面容识别");
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -168,11 +227,17 @@ pub unsafe extern "system" fn wnd_proc_subclass(
                         error!("从全局变量获取连接池失败");
                     }
                 }
-
                 // println!("[会话{}] 屏幕已锁屏", session_id);
             }
             WTS_SESSION_UNLOCK => {
-                // println!("[会话{}] 屏幕已解锁", session_id);
+                // 终止线程
+                if !IS_BREAK_THREAD.load(Ordering::SeqCst) {
+                    IS_BREAK_THREAD.store(true, Ordering::SeqCst);
+                    // 连接自己
+                    if let Err(e) = Client::new(HSTRING::from(r"\\.\pipe\MansonWindowsUnlockRustClient")) {
+                        warn!("安全关闭线程失败: {}", e);
+                    }
+                }
                 // 解锁取消计时器
                 IS_LOCKED.store(false, Ordering::SeqCst);
                 unsafe {
@@ -190,24 +255,30 @@ pub unsafe extern "system" fn wnd_proc_subclass(
 
             // 二次检查状态
             if IS_LOCKED.load(Ordering::SeqCst) {
-                // 先打开摄像头
-                let result = open_camera(None, CAMERA_INDEX.load(Ordering::SeqCst));
-                if let Err(e) = result {
-                    error!("打开摄像头失败 {}", e.msg);
-                } else {
-                    // 摄像头成功打开
-                    if let Err(e) = run() {
-                        error!("运行面容解锁失败: {:?}", e);
-                    };
-
-                    if let Err(e) = stop_camera() {
-                        error!("停止摄像头失败: {}", e.msg);
-                    };
-                }
+                run_before();
             }
         }
     }
     DefSubclassProc(hwnd, msg, wparam, lparam)
+}
+
+fn run_before() {
+    // 先打开摄像头
+    let result = open_camera(None, CAMERA_INDEX.load(Ordering::SeqCst));
+    if let Err(e) = result {
+        error!("打开摄像头失败 {}", e.msg);
+    } else {
+        // 摄像头成功打开
+        IS_RUN.store(true, Ordering::SeqCst);
+        if let Err(e) = run() {
+            error!("运行面容解锁失败: {:?}", e);
+        };
+
+        if let Err(e) = stop_camera() {
+            error!("停止摄像头失败: {}", e.msg);
+        };
+        IS_RUN.store(false, Ordering::SeqCst);
+    }
 }
 
 fn run() -> Result<bool, String> {
@@ -260,6 +331,12 @@ fn run() -> Result<bool, String> {
                     json_data,
                     _create_time,
                 ) = row.map_err(|e| format!("获取1条面容数据失败：{:?}", e))?;
+
+                if json_data.lock {
+                    // 锁定了账户，直接跳过
+                    continue;
+                }
+                
                 // 加载数据
                 face_token.push_str(".face");
                 let path = ROOT_DIR.join("faces").join(face_token);
@@ -361,6 +438,9 @@ fn run() -> Result<bool, String> {
             if let Err(e) = insert_unlock_log(&conn, -1, false) {
                 warn!("插入解锁日志失败：{}", e);
             };
+            // 匹配失败，次数+1
+            let now_count = MATCH_FAIL_COUNT.load(Ordering::SeqCst);
+            MATCH_FAIL_COUNT.store(now_count + 1, Ordering::SeqCst);
             return Ok(false);
         } else {
             return Err(String::from("连接池不存在"));
