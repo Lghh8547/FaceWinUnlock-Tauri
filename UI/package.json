@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "tauri:admin": "powershell -Command \"Start-Process -FilePath 'src-tauri/target/debug/facewinunlock-tauri.exe' -Verb RunAs\"",
+    "start": "concurrently \"npm run dev\" \"wait-on http://localhost:1420 && npm run tauri:admin\""
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
@@ -26,6 +28,8 @@
   "devDependencies": {
     "@tauri-apps/cli": "^2",
     "@vitejs/plugin-vue": "^5.2.1",
-    "vite": "^6.0.3"
+    "concurrently": "^9.2.1",
+    "vite": "^6.0.3",
+    "wait-on": "^9.0.3"
   }
 }

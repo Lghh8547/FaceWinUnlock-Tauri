@@ -42,6 +42,7 @@ pub fn write(handle: HANDLE, content: String) -> Result<()> {
 
 pub struct Server {
     pub handle: HANDLE,
+    #[allow(dead_code)]
     pipe_name: HSTRING,
     is_connected: bool,
 }
@@ -87,6 +88,7 @@ impl Drop for Server {
 
 pub struct Client {
     pub handle: HANDLE,
+    #[allow(dead_code)]
     pipe_name: HSTRING,
 }
 
